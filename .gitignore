@@ -1,0 +1,9 @@
+# Build artifacts
+/dist/
+
+# Sensitive audit logs — never commit (see SECURITY.md)
+/logs/
+
+# Go
+*.test
+*.out
