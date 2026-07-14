@@ -25,6 +25,12 @@ type Policy struct {
 	// AllowedCommands, when non-empty, restricts the process tool to these
 	// executable base names.
 	AllowedCommands []string
+	// Unrestricted disables the policy gates entirely: the filesystem tool may
+	// touch any path, the process tool may run any command in any working
+	// directory, and the shell is enabled. Every action is still fully logged.
+	// This is the "do whatever it wants, but record everything" mode and is
+	// intended for trusted/sandboxed environments only (see SECURITY.md).
+	Unrestricted bool
 }
 
 // DefaultPolicy returns conservative defaults with no roots and shell disabled.
@@ -35,8 +41,12 @@ func DefaultPolicy() Policy {
 	}
 }
 
-// pathAllowed reports whether abs is within an approved root.
+// pathAllowed reports whether abs is within an approved root. In unrestricted
+// mode every path is allowed.
 func (p Policy) pathAllowed(abs string) bool {
+	if p.Unrestricted {
+		return true
+	}
 	abs = filepath.Clean(abs)
 	for _, root := range p.ApprovedRoots {
 		root = filepath.Clean(root)

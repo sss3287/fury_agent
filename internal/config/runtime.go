@@ -33,6 +33,10 @@ type Runtime struct {
 	ApprovedRoots []string `json:"approved_roots"`
 	EnableShell   bool     `json:"enable_shell"`
 	NetworkAllow  []string `json:"network_allow"`
+	// Unrestricted removes all tool policy gates (filesystem anywhere, any
+	// command, shell enabled). Every action is still fully logged. Trusted or
+	// sandboxed environments only.
+	Unrestricted bool `json:"unrestricted"`
 
 	// Behavior.
 	Stream bool `json:"stream"`
@@ -127,6 +131,9 @@ func ApplyEnv(rt Runtime) Runtime {
 	}
 	if os.Getenv("FURY_HASH_CHAIN") == "1" {
 		rt.HashChain = true
+	}
+	if os.Getenv("FURY_UNRESTRICTED") == "1" {
+		rt.Unrestricted = true
 	}
 	return rt
 }

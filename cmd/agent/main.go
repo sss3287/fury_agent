@@ -69,6 +69,9 @@ Run flags:
   --strict-logging  stop the run on a logging failure
   --allow-root <d>  add an approved filesystem/process root (repeatable)
   --enable-shell    enable the shell tool
+  --unrestricted    remove all tool policy gates (shell on, any path, any
+    (--yolo)        command); every action is still fully logged. Trusted or
+                    sandboxed environments only.
 `)
 }
 
@@ -137,6 +140,15 @@ func cmdRun(args []string) int {
 	}
 
 	registry := buildToolRegistry(rt)
+	if rt.Unrestricted {
+		fmt.Fprintln(os.Stderr, "WARNING: unrestricted tool policy — the agent may run any command and access any path. All actions are logged.")
+		_ = logger.Emit(logging.EventPolicyDecision, logging.EventIDs{}, map[string]any{
+			"policy":       "unrestricted",
+			"shell":        true,
+			"filesystem":   "unconfined",
+			"command_gate": "none",
+		})
+	}
 	effModel, _ := config.EffectiveModel(inv, rt)
 	ag := agent.New(provider, registry, logger, agent.Config{
 		Model:  effModel,
@@ -254,10 +266,17 @@ func buildToolRegistry(rt config.Runtime) *tools.Registry {
 		EnableShell:    rt.EnableShell,
 		DefaultTimeout: 60 * time.Second,
 		MaxOutputBytes: rt.MaxToolOutput,
+		Unrestricted:   rt.Unrestricted,
+	}
+	// Unrestricted mode removes the gates: shell on, filesystem available with no
+	// root confinement, any command in any working dir. Everything is still
+	// logged in full.
+	if policy.Unrestricted {
+		policy.EnableShell = true
 	}
 	reg := tools.NewRegistry()
 	reg.Register(tools.NewProcessTool(policy))
-	if len(policy.ApprovedRoots) > 0 {
+	if len(policy.ApprovedRoots) > 0 || policy.Unrestricted {
 		reg.Register(tools.NewFileSystemTool(policy))
 	}
 	if policy.EnableShell {

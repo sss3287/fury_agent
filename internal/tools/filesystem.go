@@ -51,7 +51,7 @@ func (t *FileSystemTool) Execute(_ context.Context, call model.ToolCall) model.T
 	if err := json.Unmarshal(call.Arguments, &a); err != nil {
 		return errResult(call, model.ToolStatusError, "invalid arguments: "+err.Error())
 	}
-	if len(t.policy.ApprovedRoots) == 0 {
+	if len(t.policy.ApprovedRoots) == 0 && !t.policy.Unrestricted {
 		return errResult(call, model.ToolStatusDenied, "filesystem tool has no approved roots")
 	}
 	abs, err := filepath.Abs(a.Path)

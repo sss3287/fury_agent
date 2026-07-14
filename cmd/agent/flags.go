@@ -8,17 +8,19 @@ import (
 
 // parsedFlags holds command-line overrides that win over the config file.
 type parsedFlags struct {
-	inputPath    string
-	configPath   string
-	logDir       string
-	stream       bool
-	streamSet    bool
-	strictLog    bool
-	strictLogSet bool
-	approvedRoot []string
-	enableShell  bool
-	enableSet    bool
-	model        string
+	inputPath     string
+	configPath    string
+	logDir        string
+	stream        bool
+	streamSet     bool
+	strictLog     bool
+	strictLogSet  bool
+	approvedRoot  []string
+	enableShell   bool
+	enableSet     bool
+	unrestricted  bool
+	unrestrictSet bool
+	model         string
 }
 
 // apply overlays flag values onto rt (highest precedence except invariants).
@@ -37,6 +39,9 @@ func (f parsedFlags) apply(rt *config.Runtime) {
 	}
 	if f.enableSet {
 		rt.EnableShell = f.enableShell
+	}
+	if f.unrestrictSet {
+		rt.Unrestricted = f.unrestricted
 	}
 	if f.model != "" {
 		rt.ModelOverride = f.model
@@ -80,6 +85,8 @@ func parseFlags(args []string) (parsedFlags, []string, error) {
 			f.strictLog, f.strictLogSet = true, true
 		case "--enable-shell":
 			f.enableShell, f.enableSet = true, true
+		case "--unrestricted", "--yolo":
+			f.unrestricted, f.unrestrictSet = true, true
 		default:
 			if len(a) > 2 && a[:2] == "--" {
 				return f, nil, fmt.Errorf("unknown flag: %s", a)

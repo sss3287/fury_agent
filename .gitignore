@@ -1,5 +1,8 @@
 # Build artifacts
 /dist/
+/agent
+/agent-*
+*.exe
 
 # Sensitive audit logs — never commit (see SECURITY.md)
 /logs/
@@ -7,3 +10,21 @@
 # Go
 *.test
 *.out
+*.prof
+coverage.txt
+coverage.html
+go.work
+go.work.sum
+
+# Local config / secrets
+*.local.json
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
