@@ -18,6 +18,9 @@ type parsedFlags struct {
 	approvedRoot  []string
 	enableShell   bool
 	enableSet     bool
+	enableEBPF    bool
+	enableEBPFSet bool
+	requireEBPF   bool
 	unrestricted  bool
 	unrestrictSet bool
 	model         string
@@ -39,6 +42,13 @@ func (f parsedFlags) apply(rt *config.Runtime) {
 	}
 	if f.enableSet {
 		rt.EnableShell = f.enableShell
+	}
+	if f.enableEBPFSet {
+		rt.EnableEBPF = f.enableEBPF
+	}
+	if f.requireEBPF {
+		rt.EnableEBPF = true
+		rt.RequireEBPF = true
 	}
 	if f.unrestrictSet {
 		rt.Unrestricted = f.unrestricted
@@ -85,6 +95,10 @@ func parseFlags(args []string) (parsedFlags, []string, error) {
 			f.strictLog, f.strictLogSet = true, true
 		case "--enable-shell":
 			f.enableShell, f.enableSet = true, true
+		case "--enable-ebpf":
+			f.enableEBPF, f.enableEBPFSet = true, true
+		case "--require-ebpf":
+			f.requireEBPF = true
 		case "--unrestricted", "--yolo":
 			f.unrestricted, f.unrestrictSet = true, true
 		default:

@@ -32,6 +32,8 @@ type Runtime struct {
 	// Tool policy.
 	ApprovedRoots []string `json:"approved_roots"`
 	EnableShell   bool     `json:"enable_shell"`
+	EnableEBPF    bool     `json:"enable_ebpf"`
+	RequireEBPF   bool     `json:"require_ebpf"`
 	NetworkAllow  []string `json:"network_allow"`
 	// Unrestricted removes all tool policy gates (filesystem anywhere, any
 	// command, shell enabled). Every action is still fully logged. Trusted or

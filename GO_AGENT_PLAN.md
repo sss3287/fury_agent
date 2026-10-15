@@ -21,8 +21,22 @@ Build a command-line agent that:
 - A graphical interface.
 - A multi-provider binary that dynamically selects OpenAI, Anthropic, or Gemini at runtime.
 - A general-purpose sandbox with strong operating-system isolation. The first release provides policy, timeouts, path controls, and process controls; strong isolation should use an external container, VM, or OS sandbox.
+
 - A distributed agent service, persistent queue, or multi-user server.
 - A universal schema that erases provider-specific semantics.
+
+### Optional Linux process-tree telemetry
+
+When enabled, a native Go eBPF observer attaches to generic syscall-entry,
+syscall-exit, and process-fork tracepoints for the agent process. A BPF PID map
+propagates scope to descendants, and a ring buffer streams selected syscall
+entry/return events into the session event log. The implementation targets
+Linux amd64 and arm64 and does not use a separate `bpftrace` process or require
+a C compiler at runtime. `--enable-ebpf` is best-effort; `--require-ebpf` fails
+the run before provider initialization if the kernel does not permit map
+creation or tracepoint attachment. Captured pathname strings are sensitive;
+arbitrary syscall arguments and buffers are excluded. This is observability
+only and does not enforce policy or isolate the process tree.
 
 ## 3. Key architectural decisions
 

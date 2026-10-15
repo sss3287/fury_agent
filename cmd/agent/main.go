@@ -16,6 +16,7 @@ import (
 	"github.com/ahhh/fury_agent/internal/agent"
 	"github.com/ahhh/fury_agent/internal/buildinfo"
 	"github.com/ahhh/fury_agent/internal/config"
+	"github.com/ahhh/fury_agent/internal/ebpfwatch"
 	"github.com/ahhh/fury_agent/internal/logging"
 	"github.com/ahhh/fury_agent/internal/tools"
 )
@@ -69,6 +70,8 @@ Run flags:
   --strict-logging  stop the run on a logging failure
   --allow-root <d>  add an approved filesystem/process root (repeatable)
   --enable-shell    enable the shell tool
+  --enable-ebpf     capture selected syscalls for the agent process tree (Linux BPF privileges required)
+  --require-ebpf    fail startup if eBPF tracing cannot attach
   --unrestricted    remove all tool policy gates (shell on, any path, any
     (--yolo)        command); every action is still fully logged. Trusted or
                     sandboxed environments only.
@@ -132,8 +135,40 @@ func cmdRun(args []string) int {
 		"stream": rt.Stream,
 	})
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	var observer *ebpfwatch.Observer
+	if rt.EnableEBPF || rt.RequireEBPF {
+		pid, watchErr := ebpfwatch.HostPID()
+		if watchErr == nil {
+			observer, watchErr = ebpfwatch.Start(ctx, pid, func(event ebpfwatch.Event) {
+				_ = logger.Emit(logging.EventEBPF, logging.EventIDs{}, event)
+				if event.Error != "" && rt.RequireEBPF {
+					stop()
+				}
+			})
+		}
+		if watchErr != nil {
+			_ = logger.Emit(logging.EventEBPF, logging.EventIDs{}, ebpfwatch.Event{Error: watchErr.Error()})
+			if rt.RequireEBPF {
+				fmt.Fprintln(os.Stderr, "eBPF initialization failed:", watchErr)
+				_ = logger.WriteSummary("error", nil, nil)
+				_ = logger.Emit(logging.EventSessionEnd, logging.EventIDs{}, map[string]any{"status": "error"})
+				return agent.ExitInternal
+			}
+			fmt.Fprintln(os.Stderr, "warning: eBPF tracing unavailable:", watchErr)
+		} else {
+			_ = logger.Emit(logging.EventEBPF, logging.EventIDs{}, map[string]any{
+				"status": "attached", "root_pid": pid, "scope": "agent process tree",
+			})
+		}
+	}
+
 	provider, err := newCompiledProvider(inv, rt, redactor)
 	if err != nil {
+		if observer != nil {
+			_ = observer.Close()
+		}
 		fmt.Fprintln(os.Stderr, "provider init failed:", err)
 		_ = logger.WriteSummary("error", nil, nil)
 		return agent.ExitProviderAuth
@@ -156,10 +191,15 @@ func cmdRun(args []string) int {
 		Limits: limitsFromRuntime(rt),
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
 	result, runErr := ag.Run(ctx, instruction)
+	if observer != nil {
+		if closeErr := observer.Close(); closeErr != nil {
+			_ = logger.Emit(logging.EventEBPF, logging.EventIDs{}, ebpfwatch.Event{Error: "stop eBPF observer: " + closeErr.Error()})
+			if rt.RequireEBPF && runErr == nil {
+				runErr = fmt.Errorf("stop required eBPF observer: %w", closeErr)
+			}
+		}
+	}
 
 	status := "success"
 	if runErr != nil {

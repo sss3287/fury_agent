@@ -191,7 +191,27 @@ agent replay-log <session-dir>      validate + summarize a session log (no re-ex
 
 Common `run` flags: `--stream`, `--input <file>`, `--config <file>`,
 `--log-dir <dir>`, `--strict-logging`, `--allow-root <dir>` (repeatable),
-`--enable-shell`.
+`--enable-shell`, `--enable-ebpf`.
+
+Linux runs may enable native eBPF session telemetry with `--enable-ebpf` (or
+`"enable_ebpf": true` in config). fury-agent loads tracepoint programs in its
+own process, attaches to generic syscall-entry/exit and process-fork
+tracepoints, and streams selected process, filesystem, network, and
+privilege-sensitive syscall events from a BPF ring buffer into `events.jsonl`.
+It tracks the agent
+and its child-process tree for the duration of the run. Events record PID/TID,
+kernel monotonic time, syscall ID/name, entry or exit phase, return value, and
+(for pathname syscalls) the path string. Other raw syscall arguments and user
+data are deliberately excluded. Paths may contain sensitive names and are
+written to the session audit log, so enable the feature only when that capture
+is appropriate. eBPF is disabled by default. `--require-ebpf` makes startup
+fail if the kernel, BPF privileges, or tracepoints are unavailable; otherwise
+an attach error is logged and the agent continues without telemetry. This
+needs no `bpftrace` binary or C
+toolchain, but does require a Linux kernel with BPF ring-buffer support and
+sufficient BPF/perf privileges (often root or delegated capabilities). Unit
+tests validate the generated BPF instruction streams and event decoding without
+loading a kernel program.
 
 Exit codes: `0` success, `2` bad config, `3` provider/auth, `4` provider
 temporary, `5` tool failure, `6` policy denied, `7` timeout/cancel, `8` logging

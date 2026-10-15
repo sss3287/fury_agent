@@ -27,6 +27,7 @@ const (
 	EventToolStart      EventType = "tool_start"
 	EventToolComplete   EventType = "tool_complete"
 	EventPolicyDecision EventType = "policy_decision"
+	EventEBPF           EventType = "ebpf_event"
 	EventLimit          EventType = "limit_reached"
 	EventError          EventType = "error"
 	EventDegradedLog    EventType = "degraded_logging"
