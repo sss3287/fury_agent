@@ -29,14 +29,25 @@ Build a command-line agent that:
 
 When enabled, a native Go eBPF observer attaches to generic syscall-entry,
 syscall-exit, and process-fork tracepoints for the agent process. A BPF PID map
-propagates scope to descendants, and a ring buffer streams selected syscall
-entry/return events into the session event log. The implementation targets
-Linux amd64 and arm64 and does not use a separate `bpftrace` process or require
-a C compiler at runtime. `--enable-ebpf` is best-effort; `--require-ebpf` fails
-the run before provider initialization if the kernel does not permit map
-creation or tracepoint attachment. Captured pathname strings are sensitive;
-arbitrary syscall arguments and buffers are excluded. This is observability
-only and does not enforce policy or isolate the process tree.
+propagates scope to descendants, and a ring buffer streams every raw syscall
+entry and exit into the session event log. Entry events include all six raw
+register arguments; exit events include the return value. Known calls are
+named and other calls retain their numeric ID. Memory-related syscalls such as
+`mmap`, `munmap`, `mprotect`, `pkey_mprotect`, `mremap`, `brk`, `madvise`,
+`execve`, shared-memory operations, memory locking, and cross-process memory
+operations are tagged so mapping and permission changes can be reconstructed
+from arguments and results. Ring-buffer output failures are counted and
+reported when the observer stops. The implementation targets Linux amd64 and arm64 and does not use a
+separate `bpftrace` process or require a C compiler at runtime.
+
+Raw arguments can contain addresses, file descriptors, flags, and other
+sensitive values; pathname strings are also sensitive. Pointer arguments are
+logged as addresses, not dereferenced buffers. The observer does not record
+ordinary CPU load/store instructions or the bytes changed in memory. BPF
+syscall telemetry is observability only and does not enforce policy or isolate
+the process tree. `--enable-ebpf` is best-effort; `--require-ebpf` fails the run
+before provider initialization if the kernel does not permit map creation or
+tracepoint attachment.
 
 ## 3. Key architectural decisions
 

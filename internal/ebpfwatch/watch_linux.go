@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	ringBufferBytes = 1 << 20
+	ringBufferBytes = 8 << 20
 	trackedPIDLimit = 1 << 16
 	pathBytes       = 128
-	eventHeaderSize = 40
+	eventHeaderSize = 88
 	eventSize       = eventHeaderSize + pathBytes
 )
 
@@ -36,13 +36,14 @@ const (
 // membership to child processes so process tools and their descendants remain
 // correlated with the agent session.
 type Observer struct {
-	reader *ringbuf.Reader
-	links  []link.Link
-	progs  []*ebpf.Program
-	maps   []*ebpf.Map
-	stop   context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	reader  *ringbuf.Reader
+	links   []link.Link
+	progs   []*ebpf.Program
+	maps    []*ebpf.Map
+	stop    context.CancelFunc
+	done    chan struct{}
+	onEvent func(Event)
+	once    sync.Once
 }
 
 // Start loads and attaches native eBPF tracepoint programs. It requires a
@@ -74,16 +75,26 @@ func Start(ctx context.Context, rootPID uint32, onEvent func(Event)) (*Observer,
 		tracked.Close()
 		return nil, fmt.Errorf("create event ring buffer: %w", err)
 	}
+	dropped, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name: "fury_dropped", Type: ebpf.PerCPUArray, KeySize: 4, ValueSize: 8, MaxEntries: 1,
+	})
+	if err != nil {
+		tracked.Close()
+		events.Close()
+		return nil, fmt.Errorf("create dropped-event counter: %w", err)
+	}
 	rootValue := uint32(1)
 	if err := tracked.Put(rootPID, rootValue); err != nil {
 		tracked.Close()
 		events.Close()
+		dropped.Close()
 		return nil, fmt.Errorf("track root PID %d: %w", rootPID, err)
 	}
-	programs, err := makePrograms(tracked, events)
+	programs, err := makePrograms(tracked, events, dropped)
 	if err != nil {
 		tracked.Close()
 		events.Close()
+		dropped.Close()
 		return nil, fmt.Errorf("load BPF programs: %w", err)
 	}
 	reader, err := ringbuf.NewReader(events)
@@ -91,6 +102,7 @@ func Start(ctx context.Context, rootPID uint32, onEvent func(Event)) (*Observer,
 		closePrograms(programs)
 		tracked.Close()
 		events.Close()
+		dropped.Close()
 		return nil, fmt.Errorf("open BPF event reader: %w", err)
 	}
 	var links []link.Link
@@ -112,14 +124,15 @@ func Start(ctx context.Context, rootPID uint32, onEvent func(Event)) (*Observer,
 			closePrograms(programs)
 			tracked.Close()
 			events.Close()
+			dropped.Close()
 			return nil, fmt.Errorf("attach %s:%s tracepoint: %w", spec.group, spec.name, attachErr)
 		}
 		links = append(links, attached)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	o := &Observer{
-		reader: reader, links: links, progs: programs, maps: []*ebpf.Map{tracked, events},
-		stop: cancel, done: make(chan struct{}),
+		reader: reader, links: links, progs: programs, maps: []*ebpf.Map{tracked, events, dropped},
+		stop: cancel, done: make(chan struct{}), onEvent: onEvent,
 	}
 	go o.readEvents(runCtx, onEvent)
 	return o, nil
@@ -137,6 +150,13 @@ func (o *Observer) Close() error {
 		}
 		o.stop()
 		<-o.done
+		if dropped, err := o.droppedEvents(); err != nil {
+			if first == nil {
+				first = fmt.Errorf("read dropped-event counter: %w", err)
+			}
+		} else if dropped > 0 {
+			o.onEvent(Event{Dropped: dropped})
+		}
 		if err := o.reader.Close(); err != nil && first == nil {
 			first = err
 		}
@@ -180,19 +200,32 @@ func (o *Observer) readEvents(ctx context.Context, onEvent func(Event)) {
 			continue
 		}
 		event.Syscall = syscallName(event.SyscallID)
+		event.MemoryOp = memoryOperation(event.SyscallID)
 		onEvent(event)
 	}
 }
 
-func makePrograms(tracked, events *ebpf.Map) ([]*ebpf.Program, error) {
-	syscalls := syscallIDs()
+func (o *Observer) droppedEvents() (uint64, error) {
+	key := uint32(0)
+	var perCPU []uint64
+	if err := o.maps[2].Lookup(&key, &perCPU); err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, count := range perCPU {
+		total += count
+	}
+	return total, nil
+}
+
+func makePrograms(tracked, events, dropped *ebpf.Map) ([]*ebpf.Program, error) {
 	sysEnter := &ebpf.ProgramSpec{
 		Name: "fury_sys_enter", Type: ebpf.TracePoint, License: "GPL",
-		Instructions: syscallProgram(tracked.FD(), events.FD(), syscalls, pathArgumentIndexes(), 1),
+		Instructions: syscallProgram(tracked.FD(), events.FD(), dropped.FD(), pathArgumentIndexes(), 1),
 	}
 	sysExit := &ebpf.ProgramSpec{
 		Name: "fury_sys_exit", Type: ebpf.TracePoint, License: "GPL",
-		Instructions: syscallProgram(tracked.FD(), events.FD(), syscalls, nil, 2),
+		Instructions: syscallProgram(tracked.FD(), events.FD(), dropped.FD(), nil, 2),
 	}
 	fork := &ebpf.ProgramSpec{
 		Name: "fury_fork", Type: ebpf.TracePoint, License: "GPL",
@@ -216,7 +249,7 @@ func makePrograms(tracked, events *ebpf.Map) ([]*ebpf.Program, error) {
 	return []*ebpf.Program{first, second, third}, nil
 }
 
-func syscallProgram(trackedFD, eventsFD int, syscallIDs []int32, pathArgs map[int32]int16, phase int16) asm.Instructions {
+func syscallProgram(trackedFD, eventsFD, droppedFD int, pathArgs map[int32]int16, phase int16) asm.Instructions {
 	ins := asm.Instructions{
 		asm.Mov.Reg(asm.R6, asm.R1),
 		asm.LoadMem(asm.R8, asm.R6, 8, asm.DWord), // raw_syscalls:sys_enter.id
@@ -229,25 +262,19 @@ func syscallProgram(trackedFD, eventsFD int, syscallIDs []int32, pathArgs map[in
 		asm.Add.Imm(asm.R2, -4),
 		asm.FnMapLookupElem.Call(),
 		asm.JEq.Imm(asm.R0, 0, "exit"),
+		asm.StoreImm(asm.RFP, -eventSize, 0, asm.DWord),
 	}
-	for _, id := range syscallIDs {
-		ins = append(ins, asm.JEq.Imm(asm.R8, id, "emit"))
-	}
-	ins = append(ins, asm.Ja.Label("exit"))
-	ins = append(ins, asm.StoreImm(asm.RFP, -eventSize+eventHeaderSize, 0, asm.DWord).WithSymbol("emit"))
-	for offset := int16(-eventSize + eventHeaderSize); offset < -eventSize+eventHeaderSize+pathBytes; offset += 8 {
-		if offset != -eventSize+eventHeaderSize {
-			ins = append(ins, asm.StoreImm(asm.RFP, offset, 0, asm.DWord))
-		}
+	for offset := int16(-eventSize + 8); offset < 0; offset += 8 {
+		ins = append(ins, asm.StoreImm(asm.RFP, offset, 0, asm.DWord))
 	}
 	if phase == 1 {
-		for _, id := range syscallIDs {
+		for _, id := range syscallIDs() {
 			if _, ok := pathArgs[id]; ok {
 				ins = append(ins, asm.JEq.Imm(asm.R8, id, fmt.Sprintf("path_%d", id)))
 			}
 		}
 		ins = append(ins, asm.Ja.Label("write"))
-		for _, id := range syscallIDs {
+		for _, id := range syscallIDs() {
 			index, ok := pathArgs[id]
 			if !ok {
 				continue
@@ -287,6 +314,14 @@ func syscallProgram(trackedFD, eventsFD int, syscallIDs []int32, pathArgs map[in
 	for offset := int16(-eventSize + 33); offset < -eventSize+eventHeaderSize; offset++ {
 		ins = append(ins, asm.StoreImm(asm.RFP, offset, 0, asm.Byte))
 	}
+	if phase == 1 {
+		for arg := int16(0); arg < 6; arg++ {
+			ins = append(ins,
+				asm.LoadMem(asm.R0, asm.R6, 16+arg*8, asm.DWord),
+				asm.StoreMem(asm.RFP, -eventSize+40+arg*8, asm.R0, asm.DWord),
+			)
+		}
+	}
 	ins = append(ins,
 		asm.LoadMapPtr(asm.R1, eventsFD),
 		asm.Mov.Reg(asm.R2, asm.RFP),
@@ -294,8 +329,17 @@ func syscallProgram(trackedFD, eventsFD int, syscallIDs []int32, pathArgs map[in
 		asm.Mov.Imm(asm.R3, eventSize),
 		asm.Mov.Imm(asm.R4, 0),
 		asm.FnRingbufOutput.Call(),
+		asm.JEq.Imm(asm.R0, 0, "return"),
+		asm.StoreImm(asm.RFP, -4, 0, asm.Word),
+		asm.LoadMapPtr(asm.R1, droppedFD),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, "return"),
+		asm.Mov.Imm(asm.R7, 1),
+		asm.StoreXAdd(asm.R0, asm.R7, asm.DWord),
 		asm.Mov.Imm(asm.R0, 0),
-		asm.Return(),
+		asm.Return().WithSymbol("return"),
 		asm.Mov.Imm(asm.R0, 0).WithSymbol("exit"),
 		asm.Return(),
 	)
@@ -339,6 +383,7 @@ type eventWire struct {
 	ReturnValue int64
 	Phase       uint8
 	Padding     [7]byte
+	Args        [6]uint64
 	Path        [pathBytes]byte
 }
 
@@ -359,6 +404,12 @@ func decodeEvent(raw []byte) (Event, error) {
 		SyscallID:   int64(order.Uint64(raw[16:24])),
 		Phase:       map[byte]string{1: "enter", 2: "exit"}[phase],
 		Path:        string(path),
+	}
+	if phase == 1 {
+		event.Args = make([]uint64, 6)
+		for i := range event.Args {
+			event.Args[i] = order.Uint64(raw[40+i*8 : 48+i*8])
+		}
 	}
 	if phase == 2 {
 		ret := int64(order.Uint64(raw[24:32]))
@@ -408,9 +459,9 @@ func syscallIDs() []int32 {
 	// Syscall numbers differ between architectures. Keep the monitored set
 	// explicit so unrelated high-volume syscalls do not flood the ring buffer.
 	if runtime.GOARCH == "arm64" {
-		return []int32{34, 35, 38, 39, 40, 51, 56, 93, 94, 97, 105, 106, 117, 198, 199, 200, 201, 202, 203, 220, 221, 242, 268, 273, 276, 280, 281, 435, 437}
+		return []int32{34, 35, 38, 39, 40, 51, 56, 93, 94, 97, 105, 106, 117, 196, 197, 198, 199, 200, 201, 202, 203, 214, 215, 216, 220, 221, 222, 226, 228, 229, 230, 231, 233, 242, 268, 271, 273, 276, 280, 281, 284, 288, 435, 437, 440, 447, 448, 462}
 	}
-	return []int32{2, 41, 42, 43, 49, 50, 53, 56, 57, 58, 59, 60, 82, 83, 84, 87, 101, 161, 165, 166, 175, 176, 231, 257, 258, 263, 264, 272, 288, 308, 313, 316, 321, 322, 435, 437}
+	return []int32{2, 9, 10, 11, 12, 25, 28, 30, 41, 42, 43, 49, 50, 53, 56, 57, 58, 59, 60, 67, 82, 83, 84, 87, 101, 149, 150, 151, 152, 161, 165, 166, 175, 176, 231, 257, 258, 263, 264, 272, 288, 308, 310, 311, 313, 316, 321, 322, 323, 325, 329, 435, 437, 440, 447, 448, 462}
 }
 
 func pathArgumentIndexes() map[int32]int16 {
@@ -429,8 +480,99 @@ func syscallName(id int64) string {
 			return amd64SyscallNames[i]
 		}
 	}
-	return "unknown"
+	return fmt.Sprintf("syscall_%d", id)
 }
 
-var amd64SyscallNames = []string{"open", "socket", "connect", "accept", "bind", "listen", "socketpair", "clone", "fork", "vfork", "execve", "exit", "rename", "mkdir", "rmdir", "unlink", "ptrace", "chroot", "mount", "umount2", "init_module", "delete_module", "exit_group", "openat", "mkdirat", "unlinkat", "renameat", "unshare", "accept4", "setns", "finit_module", "renameat2", "bpf", "execveat", "clone3", "openat2"}
-var arm64SyscallNames = []string{"mkdirat", "unlinkat", "renameat", "umount2", "mount", "chroot", "openat", "exit", "exit_group", "unshare", "init_module", "delete_module", "ptrace", "socket", "socketpair", "bind", "listen", "accept", "connect", "clone", "execve", "accept4", "setns", "finit_module", "renameat2", "bpf", "execveat", "clone3", "openat2"}
+// memoryOperation classifies syscalls that create, remove, resize, or change
+// permissions on virtual-memory regions, and syscalls that can modify a
+// different process's address space. Entry args and the matching exit result
+// provide the range and outcome; this does not observe ordinary CPU stores.
+func memoryOperation(id int64) string {
+	return memoryOperationForArch(runtime.GOARCH, id)
+}
+
+func memoryOperationForArch(arch string, id int64) string {
+	if arch == "arm64" {
+		switch id {
+		case 117:
+			return "ptrace"
+		case 196:
+			return "shmat"
+		case 197:
+			return "shmdt"
+		case 214:
+			return "brk"
+		case 215:
+			return "munmap"
+		case 216:
+			return "mremap"
+		case 221:
+			return "execve"
+		case 281:
+			return "execveat"
+		case 222:
+			return "mmap"
+		case 226:
+			return "mprotect"
+		case 228, 229, 230, 231, 284:
+			return syscallName(id)
+		case 233:
+			return "madvise"
+		case 271:
+			return "process_vm_writev"
+		case 288:
+			return "pkey_mprotect"
+		case 440:
+			return "process_madvise"
+		case 447:
+			return "memfd_secret"
+		case 448:
+			return "process_mrelease"
+		case 462:
+			return "mseal"
+		}
+		return ""
+	}
+	switch id {
+	case 59:
+		return "execve"
+	case 322:
+		return "execveat"
+	case 101:
+		return "ptrace"
+	case 149, 150, 151, 152, 325:
+		return syscallName(id)
+	case 9:
+		return "mmap"
+	case 10:
+		return "mprotect"
+	case 11:
+		return "munmap"
+	case 12:
+		return "brk"
+	case 25:
+		return "mremap"
+	case 28:
+		return "madvise"
+	case 30:
+		return "shmat"
+	case 67:
+		return "shmdt"
+	case 311:
+		return "process_vm_writev"
+	case 329:
+		return "pkey_mprotect"
+	case 440:
+		return "process_madvise"
+	case 447:
+		return "memfd_secret"
+	case 448:
+		return "process_mrelease"
+	case 462:
+		return "mseal"
+	}
+	return ""
+}
+
+var amd64SyscallNames = []string{"open", "mmap", "mprotect", "munmap", "brk", "mremap", "madvise", "shmat", "socket", "connect", "accept", "bind", "listen", "socketpair", "clone", "fork", "vfork", "execve", "exit", "shmdt", "rename", "mkdir", "rmdir", "unlink", "ptrace", "mlock", "munlock", "mlockall", "munlockall", "chroot", "mount", "umount2", "init_module", "delete_module", "exit_group", "openat", "mkdirat", "unlinkat", "renameat", "unshare", "accept4", "setns", "process_vm_readv", "process_vm_writev", "finit_module", "renameat2", "bpf", "execveat", "userfaultfd", "mlock2", "pkey_mprotect", "clone3", "openat2", "process_madvise", "memfd_secret", "process_mrelease", "mseal"}
+var arm64SyscallNames = []string{"mkdirat", "unlinkat", "renameat", "umount2", "mount", "chroot", "openat", "exit", "exit_group", "unshare", "init_module", "delete_module", "ptrace", "shmat", "shmdt", "socket", "socketpair", "bind", "listen", "accept", "connect", "brk", "munmap", "mremap", "clone", "execve", "mmap", "mprotect", "mlock", "munlock", "mlockall", "munlockall", "madvise", "accept4", "setns", "process_vm_writev", "finit_module", "renameat2", "bpf", "execveat", "mlock2", "pkey_mprotect", "clone3", "openat2", "process_madvise", "memfd_secret", "process_mrelease", "mseal"}

@@ -196,21 +196,28 @@ Common `run` flags: `--stream`, `--input <file>`, `--config <file>`,
 Linux runs may enable native eBPF session telemetry with `--enable-ebpf` (or
 `"enable_ebpf": true` in config). fury-agent loads tracepoint programs in its
 own process, attaches to generic syscall-entry/exit and process-fork
-tracepoints, and streams selected process, filesystem, network, and
-privilege-sensitive syscall events from a BPF ring buffer into `events.jsonl`.
-It tracks the agent
-and its child-process tree for the duration of the run. Events record PID/TID,
-kernel monotonic time, syscall ID/name, entry or exit phase, return value, and
-(for pathname syscalls) the path string. Other raw syscall arguments and user
-data are deliberately excluded. Paths may contain sensitive names and are
-written to the session audit log, so enable the feature only when that capture
-is appropriate. eBPF is disabled by default. `--require-ebpf` makes startup
-fail if the kernel, BPF privileges, or tracepoints are unavailable; otherwise
-an attach error is logged and the agent continues without telemetry. This
-needs no `bpftrace` binary or C
+tracepoints, and streams every syscall entry and exit from the agent process
+tree through a BPF ring buffer into `events.jsonl`. Entry records include the
+six raw syscall arguments; exit records include the return value. Known calls
+are named; all events retain their architecture-specific syscall ID. Virtual
+memory operations (`mmap`, `munmap`, `mprotect`, `pkey_mprotect`, `mremap`,
+`brk`, `madvise`, `execve`, shared-memory operations, memory locking, and
+cross-process memory operations) are tagged with `memory_op` so their requested
+ranges and outcomes can be reconstructed. Ring-buffer output failures are
+counted and reported when the observer stops.
+
+Raw arguments may contain sensitive addresses, file descriptors, flags, or
+other values. Pointer arguments are recorded as addresses, not dereferenced
+buffers. This does **not** observe every ordinary CPU memory load/store or
+record changed bytes; syscall tracing can show memory-map changes and explicit
+cross-process memory operations only. Paths and raw arguments are written to
+the session audit log, so enable this only when that capture is appropriate.
+eBPF is disabled by default. `--require-ebpf` fails startup if the kernel, BPF
+privileges, or tracepoints are unavailable; otherwise an attach error is logged
+and the agent continues without telemetry. This needs no `bpftrace` binary or C
 toolchain, but does require a Linux kernel with BPF ring-buffer support and
 sufficient BPF/perf privileges (often root or delegated capabilities). Unit
-tests validate the generated BPF instruction streams and event decoding without
+tests validate generated instruction streams and event decoding without
 loading a kernel program.
 
 Exit codes: `0` success, `2` bad config, `3` provider/auth, `4` provider

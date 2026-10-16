@@ -14,8 +14,8 @@ import (
 
 func TestProgramInstructionsResolveAndEncode(t *testing.T) {
 	for name, instructions := range map[string][]byte{
-		"sys_enter": marshalProgram(t, syscallProgram(1, 2, syscallIDs(), pathArgumentIndexes(), 1)),
-		"sys_exit":  marshalProgram(t, syscallProgram(1, 2, syscallIDs(), nil, 2)),
+		"sys_enter": marshalProgram(t, syscallProgram(1, 2, 3, pathArgumentIndexes(), 1)),
+		"sys_exit":  marshalProgram(t, syscallProgram(1, 2, 3, nil, 2)),
 		"fork":      marshalProgram(t, forkProgram(1)),
 	} {
 		if len(instructions) == 0 || len(instructions)%8 != 0 {
@@ -53,17 +53,55 @@ func TestDecodeEventUsesKernelWireLayout(t *testing.T) {
 	order.PutUint32(raw[12:16], 654)
 	order.PutUint64(raw[16:24], 257)
 	raw[32] = 1
+	order.PutUint64(raw[40:48], 12)
+	order.PutUint64(raw[48:56], 34)
 	copy(raw[eventHeaderSize:], "/tmp/workspace/file.txt\x00ignored")
 	got, err := decodeEvent(raw[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Event{TimestampNS: 987654321, PID: 321, TID: 654, SyscallID: 257, Phase: "enter", Path: "/tmp/workspace/file.txt"}
+	want := Event{TimestampNS: 987654321, PID: 321, TID: 654, SyscallID: 257, Phase: "enter", Args: []uint64{12, 34, 0, 0, 0, 0}, Path: "/tmp/workspace/file.txt"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	if unsafe.Sizeof(eventWire{}) != eventSize {
 		t.Fatalf("wire layout is %d bytes, want %d", unsafe.Sizeof(eventWire{}), eventSize)
+	}
+}
+
+func TestDecodeExitDoesNotExposeArguments(t *testing.T) {
+	var raw [eventSize]byte
+	raw[32] = 2
+	got, err := decodeEvent(raw[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Args != nil {
+		t.Fatalf("exit event unexpectedly includes args: %v", got.Args)
+	}
+}
+
+func TestMemoryOperationNames(t *testing.T) {
+	tests := []struct {
+		arch string
+		id   int64
+		want string
+	}{
+		{arch: "amd64", id: 9, want: "mmap"},
+		{arch: "amd64", id: 10, want: "mprotect"},
+		{arch: "amd64", id: 59, want: "execve"},
+		{arch: "amd64", id: 311, want: "process_vm_writev"},
+		{arch: "amd64", id: 462, want: "mseal"},
+		{arch: "arm64", id: 222, want: "mmap"},
+		{arch: "arm64", id: 221, want: "execve"},
+		{arch: "arm64", id: 271, want: "process_vm_writev"},
+		{arch: "arm64", id: 462, want: "mseal"},
+	}
+	for _, tc := range tests {
+		got := memoryOperationForArch(tc.arch, tc.id)
+		if got != tc.want {
+			t.Errorf("%s syscall %d: got %q, want %q", tc.arch, tc.id, got, tc.want)
+		}
 	}
 }
 

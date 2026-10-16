@@ -13,11 +13,13 @@ before running it against real providers or real data.
 - **Complete tool executions** — exact executable and argv, working directory,
   timing, exit status, and captured stdout/stderr up to configured caps, with a
   SHA-256 of the full stream even when stored content is truncated.
-- **Optional eBPF process telemetry** — selected syscall names, process and
-  thread IDs, kernel monotonic timestamps, and pathname arguments for file and
-  exec calls. Enable with `--enable-ebpf`; paths are sensitive and are written
-  to the session event log. Other syscall arguments and user buffers are not
-  captured.
+- **Optional eBPF process telemetry** — every syscall entry/exit for the agent
+  process tree, raw syscall arguments, process/thread IDs, kernel monotonic
+  timestamps, pathname arguments for selected calls, and tagged virtual-memory
+  and cross-process memory operations. Enable with `--enable-ebpf`. Raw
+  arguments and paths can contain sensitive addresses and names. Pointer
+  arguments are logged as addresses; pointed-to buffers and ordinary CPU
+  memory writes are not captured.
 - **HTTP transport metadata** — method, sanitized URL, query *keys*, response
   status, timings, provider request IDs, and rate-limit headers.
 
